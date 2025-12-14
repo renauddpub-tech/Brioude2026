@@ -26,1043 +26,1388 @@
 <canvas id="game" width="320" height="240"></canvas>
 
 <script>
-(()=>{
+(() => {
+  "use strict";
 
-/* =====================
-   CANVAS
-===================== */
-const canvas=document.getElementById("game");
-const ctx=canvas.getContext("2d");
-ctx.imageSmoothingEnabled=false;
-ctx.font="12px monospace";
-ctx.textBaseline="alphabetic";
-const W=canvas.width,H=canvas.height;
+  /* =====================
+     CANVAS
+  ===================== */
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingEnabled = false;
+  ctx.textBaseline = "top";  // IMPORTANT : plus stable que "alphabetic" pour éviter l'overlap
+  ctx.textAlign = "left";
+  const W = canvas.width, H = canvas.height;
 
-/* =====================
-   ASSETS
-===================== */
-const ASSETS={
-  sprites:{
-    remy_back:"remy_back.png",
-    wauquiez_front:"wauquiez_front.png",
-    ciotti_front:"ciotti_front.png",
-    maite_front:"maite_front.png",
-    edile_front:"edile_front.png"
-  },
-  background:{ battle:"battle_bg.png" },
-  ui:{ cursor:"cursor.png", textbox:"textbox.png" }
-};
-
-const IMG={};
-function preloadAssets(done){
-  const list=[];
-  Object.values(ASSETS).forEach(group=>{
-    Object.entries(group).forEach(([k,src])=>list.push([k,src]));
-  });
-
-  if(list.length===0){ done(); return; }
-
-  let loaded=0;
-  list.forEach(([k,src])=>{
-    const i=new Image();
-    i.onload=()=>{ IMG[k]=i; if(++loaded===list.length) done(); };
-    i.onerror=()=>{ console.warn("Missing:",src); if(++loaded===list.length) done(); };
-    i.src=src;
-  });
-}
-
-/* =====================
-   UTILS
-===================== */
-const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
-const chance=p=>Math.random()<p;
-const randInt=(a,b)=>Math.floor(Math.random()*(b-a+1))+a;
-
-/* =====================
-   FX (ANIMS)
-===================== */
-const FX={
-  shakeX:0, shakeY:0, shakeFrames:0,
-  flashFrames:0,
-  overlay:null,   // {kind,x,y,t,frames}
-  floatTexts:[],  // [{text,x,y,vy,frames}]
-  hitAnim:{ player:0, enemy:0 } // bounce timer
-};
-
-function startShake(kind="hit"){
-  FX.shakeFrames = (kind==="heavy") ? 10 : 6;
-}
-function flash(frames=2){
-  FX.flashFrames = Math.max(FX.flashFrames, frames);
-}
-function setOverlay(kind,x,y,frames=18){
-  FX.overlay = {kind,x,y,t:0,frames};
-}
-function addFloatText(text,x,y){
-  FX.floatTexts.push({text,x,y,vy:-0.25,frames:42});
-}
-
-function updateFX(){
-  if(FX.shakeFrames>0){
-    FX.shakeX=(Math.random()-0.5)*6;
-    FX.shakeY=(Math.random()-0.5)*4;
-    FX.shakeFrames--;
-  } else {
-    FX.shakeX=FX.shakeY=0;
-  }
-
-  if(FX.flashFrames>0) FX.flashFrames--;
-
-  if(FX.overlay){
-    FX.overlay.t++;
-    FX.overlay.frames--;
-    if(FX.overlay.frames<=0) FX.overlay=null;
-  }
-
-  FX.floatTexts.forEach(ft=>{
-    ft.y += ft.vy;
-    ft.frames--;
-  });
-  FX.floatTexts = FX.floatTexts.filter(ft=>ft.frames>0);
-
-  if(FX.hitAnim.player>0) FX.hitAnim.player--;
-  if(FX.hitAnim.enemy>0) FX.hitAnim.enemy--;
-}
-
-/* =====================
-   TYPES (multiplicateurs cumulables)
-===================== */
-const TYPE_CHART={
-  action:{ blague:2, parisianisme:0.5 },
-  blague:{ parisianisme:2, recherche:0.5 },
-  recherche:{ blague:2, parisianisme:0.5 },
-  parisianisme:{ action:2, tradition:0.5 },
-  tradition:{ parisianisme:2, recherche:0.5 }
-};
-
-function typeMultiplier(atkType,defTypes){
-  let m=1;
-  for(let i=0;i<defTypes.length;i++){
-    const t=defTypes[i];
-    const row=TYPE_CHART[atkType];
-    const v=row ? row[t] : null;
-    if(v) m*=v;
-  }
-  return m;
-}
-
-/* =====================
-   UI TEXTE / MENU
-   (FIX: showText NE ferme plus le menu,
-   donc une fois les textes finis, le menu réapparaît)
-===================== */
-const UI={
-  text:"",visible:"",idx:0,typing:false,timer:0,
-  queue:[],
-  menu:false,items:[],menuIdx:0,
-  cooldown:0
-};
-
-function showText(t){
-  UI.text=t;
-  UI.visible="";
-  UI.idx=0;
-  UI.typing=true;
-  UI.timer=0;
-}
-function updateText(dt){
-  if(!UI.typing) return;
-  UI.timer+=dt;
-  while(UI.timer>28 && UI.idx<UI.text.length){
-    UI.visible+=UI.text[UI.idx++];
-    UI.timer-=28;
-  }
-  if(UI.idx>=UI.text.length) UI.typing=false;
-}
-function nextText(){
-  if(UI.typing){
-    UI.visible=UI.text;
-    UI.typing=false;
-    return true;
-  }
-  if(UI.queue.length){
-    showText(UI.queue.shift());
-    return true;
-  }
-  UI.text="";
-  UI.visible="";
-  return false;
-}
-function playMessages(lines){
-  const msgs=(lines||[]).filter(Boolean);
-  if(msgs.length===0){
-    UI.text="";UI.visible="";UI.queue=[];
-    return;
-  }
-  showText(msgs.shift());
-  UI.queue = msgs;
-}
-function openMenu(items){
-  UI.menu=true;
-  UI.items=items.slice();
-  UI.menuIdx=0;
-}
-
-/* =====================
-   FIGHTERS (base + stages)
-===================== */
-function stageMultiplier(stage){
-  const s=clamp(stage,-6,6);
-  if(s>=0) return 1 + s*0.15;
-  return 1 + s*0.10;
-}
-function createFighter(name,types,stats,sprite){
-  return{
-    name,types,sprite,
-    maxHP:100,
-    hp:100,
-    hpVis:100,
-    base:{ atk:stats.atk, def:stats.def, spd:stats.spd },
-    mods:{ atk:0, def:0, spd:0 },
-    status:{ burn:false, sleep:0, confusion:0, protect:0 },
-    moves:[]
+  /* =====================
+     CONFIG UI (anti-bug assets)
+     - Si tes cursor/textbox png sont énormes (ex 1024x1024),
+       on les ignore et on dessine une UI "procedurale".
+  ===================== */
+  const CONFIG = {
+    fontFamily: "monospace",
+    fontSizes: [12, 10, 8],        // fit text
+    lineH: 14,
+    typeDelayMs: 22,               // vitesse de frappe
+    inputCooldownMs: 120,
+    uiUseImagesIfReasonable: true,
+    uiMaxImgSize: 256,             // au-delà, on considère l'asset comme "non-UI"
+    hpDrainPerSec: 90,             // vitesse d'anim de HP
+    introDurationMs: 650,          // slide-in au début d'un fight
   };
-}
-function effectiveStat(f,key){
-  let v=Math.floor(f.base[key]*stageMultiplier(f.mods[key]||0));
-  // Burn = malus d'attaque (lisible + Pokemon-like)
-  if(key==="atk" && f.status.burn) v=Math.floor(v*0.5);
-  return Math.max(1,v);
-}
-function resetFighter(f){
-  f.hp=f.maxHP;
-  f.hpVis=f.maxHP;
-  f.mods={ atk:0, def:0, spd:0 };
-  f.status={ burn:false, sleep:0, confusion:0, protect:0 };
-}
 
-/* =====================
-   COORDS (pour FX)
-===================== */
-let enemy=null; // déclaré ici pour coordsFor, assigné au combat
-const player=createFighter(
-  "Remy",
-  ["recherche","blague"],
-  {atk:55,def:50,spd:60},
-  "remy_back"
-);
-
-function coordsFor(f){
-  const isPlayer=(f===player);
-  return { x:isPlayer?70:240, y:isPlayer?130:70 };
-}
-
-/* =====================
-   MOVES (Pokemon-like + "signature" par boss)
-   - power=0 => move de statut
-   - effects[] => { kind, target, chance, turns, value, stat, delta }
-===================== */
-const MOVES_PLAYER=[
-  { name:"Cahier de recherche", type:"recherche", power:24, effects:[] },
-  { name:"Plaidoyer", type:"action", power:18, effects:[
-    { kind:"confusion", target:"enemy", chance:0.40, turns:[2,4] }
-  ]},
-  { name:"Bourree auvergnate", type:"tradition", power:28, effects:[] },
-  { name:"Second degre", type:"blague", power:20, effects:[
-    { kind:"burn", target:"enemy", chance:0.30 }
-  ]}
-];
-
-/* Signature moves :
-   - Wauquiez = contrôle : sleep fiable + tempo (buff vitesse/attaque)
-   - Ciotti   = tank : protect + gros def up + burn (debuff)
-   - Maite    = sustain/burst : heal + gros coup avec contrepartie (self sleep)
-   - L'Edile  = buff/pression : buffs + protect + confusion
-*/
-const MOVES_WAUQUIEZ=[
-  { name:"Dotations publiques", type:"action", power:14, effects:[
-    { kind:"sleep", target:"enemy", chance:0.55, turns:[1,2] }
-  ]},
-  { name:"Ce que les francais veulent", type:"parisianisme", power:0, effects:[
-    { kind:"stat", target:"self", stat:"atk", delta:+1 },
-    { kind:"stat", target:"self", stat:"spd", delta:+1 }
-  ]},
-  { name:"Mauvaise foi", type:"blague", power:22, effects:[] },
-  { name:"Bottes en caoutchouc", type:"tradition", power:18, effects:[
-    { kind:"confusion", target:"enemy", chance:0.25, turns:[1,3] }
-  ]}
-];
-
-const MOVES_CIOTTI=[
-  { name:"Retranchement", type:"parisianisme", power:0, effects:[
-    { kind:"protect", target:"self", chance:1.0 }
-  ]},
-  { name:"Chauvinisme", type:"parisianisme", power:0, effects:[
-    { kind:"stat", target:"self", stat:"def", delta:+2 }
-  ]},
-  { name:"Accent chantant", type:"tradition", power:20, effects:[] },
-  { name:"UDR", type:"blague", power:16, effects:[
-    { kind:"burn", target:"enemy", chance:0.40 }
-  ]}
-];
-
-const MOVES_MAITE=[
-  { name:"Ortolan", type:"tradition", power:0, effects:[
-    { kind:"heal", target:"self", value:24 }
-  ]},
-  { name:"Aiguille", type:"tradition", power:18, effects:[
-    { kind:"stat", target:"self", stat:"atk", delta:+1 },
-    { kind:"confusion", target:"enemy", chance:0.30, turns:[1,3] }
-  ]},
-  { name:"Indigestion", type:"tradition", power:32, effects:[
-    // Contrepartie "Pokemon-like": gros degats, puis auto-sommeil
-    { kind:"sleep", target:"self", chance:1.00, turns:[1,2] }
-  ]},
-  { name:"Icone", type:"blague", power:0, effects:[
-    { kind:"stat", target:"self", stat:"atk", delta:+1 }
-  ]}
-];
-
-const MOVES_EDILE=[
-  { name:"Conseil municipal", type:"action", power:0, effects:[
-    { kind:"stat", target:"self", stat:"def", delta:+1 },
-    { kind:"stat", target:"self", stat:"atk", delta:+1 }
-  ]},
-  { name:"Clientelisme", type:"action", power:16, effects:[
-    { kind:"stat", target:"self", stat:"def", delta:+1 }
-  ]},
-  { name:"Monsieur le maire", type:"action", power:0, effects:[
-    { kind:"protect", target:"self", chance:1.0 }
-  ]},
-  { name:"Bon sens paysan", type:"tradition", power:22, effects:[
-    { kind:"confusion", target:"enemy", chance:0.25, turns:[1,3] }
-  ]}
-];
-
-/* =====================
-   CAMPAIGN (adversaires + movesets uniques)
-===================== */
-const CAMPAIGN=[
-  {
-    name:"Laurent Wauquiez",
-    sprite:"wauquiez_front",
-    types:["parisianisme"],
-    stats:{atk:60,def:45,spd:50},
-    moves:MOVES_WAUQUIEZ,
-    quote:"Moi, je connais les territoires Remy."
-  },
-  {
-    name:"Eric Ciotti",
-    sprite:"ciotti_front",
-    types:["blague"],
-    stats:{atk:48,def:65,spd:55},
-    moves:MOVES_CIOTTI,
-    quote:"C'est quand il y en a beaucoup que ca pose des problemes."
-  },
-  {
-    name:"Maite",
-    sprite:"maite_front",
-    types:["tradition"],
-    stats:{atk:65,def:55,spd:35},
-    moves:MOVES_MAITE,
-    quote:"Miam miam."
-  },
-  {
-    name:"L'Edile",
-    sprite:"edile_front",
-    types:["action"],
-    stats:{atk:50,def:60,spd:40},
-    moves:MOVES_EDILE,
-    quote:"Brioude ne sera jamais autrement."
+  function setFont(px){
+    ctx.font = `${px}px ${CONFIG.fontFamily}`;
   }
-];
 
-player.moves = MOVES_PLAYER;
+  /* =====================
+     ASSETS
+  ===================== */
+  const ASSETS = {
+    sprites: {
+      remy_back: "remy_back.png",
+      wauquiez_front: "wauquiez_front.png",
+      ciotti_front: "ciotti_front.png",
+      maite_front: "maite_front.png",
+      edile_front: "edile_front.png",
+    },
+    background: { battle: "battle_bg.png" },
+    ui: { cursor: "cursor.png", textbox: "textbox.png" }
+  };
 
-/* =====================
-   COMBAT CORE
-===================== */
-function computeDamage(attacker,defender,move){
-  const atk=effectiveStat(attacker,"atk");
-  const def=effectiveStat(defender,"def");
+  const IMG = {};
+  function preloadAssets(done){
+    const list = [];
+    Object.values(ASSETS).forEach(group=>{
+      Object.entries(group).forEach(([k,src]) => list.push([k,src]));
+    });
+    if(list.length === 0){ done(); return; }
 
-  const base=(atk/def)*move.power;
-  const randFactor=0.85+Math.random()*0.15;
-  const mult=typeMultiplier(move.type, defender.types);
+    let loaded = 0;
+    list.forEach(([k,src])=>{
+      const i = new Image();
+      i.onload = () => { IMG[k] = i; if(++loaded === list.length) done(); };
+      i.onerror = () => { console.warn("Missing asset:", src); if(++loaded === list.length) done(); };
+      i.src = src;
+    });
+  }
 
-  const spd=effectiveStat(attacker,"spd");
-  const critChance=clamp(0.06 + spd/220, 0.06, 0.20);
-  const isCrit=chance(critChance);
+  /* =====================
+     UTILS
+  ===================== */
+  const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
+  const chance = p => Math.random() < p;
+  const randInt = (a,b)=>Math.floor(Math.random()*(b-a+1))+a;
 
-  const dmg=Math.max(1, Math.floor(base*randFactor*mult*(isCrit?1.9:1)));
-  return { dmg, mult, isCrit };
-}
+  function isReasonableUiImage(img){
+    if(!img) return false;
+    return (img.width <= CONFIG.uiMaxImgSize && img.height <= CONFIG.uiMaxImgSize);
+  }
 
-function applyDamage(target, amount, opts={}){
-  target.hp = clamp(target.hp - amount, 0, target.maxHP);
+  /* =====================
+     FX (shake / flash / overlay / float text / bounce / intro slide)
+  ===================== */
+  const FX = {
+    shakeX:0, shakeY:0, shakeFrames:0,
+    flashFrames:0,
+    overlay:null,    // {kind,x,y,t,frames}
+    floatTexts:[],   // [{text,x,y,vy,frames}]
+    hitAnim:{ player:0, enemy:0 },
+    intro:{ active:false, t:0 }
+  };
 
-  const {x,y}=coordsFor(target);
-  addFloatText(String(amount), x, y);
-  if(opts.floatLabel) addFloatText(opts.floatLabel, x, y-12);
+  function startShake(kind="hit"){
+    FX.shakeFrames = (kind === "heavy") ? 10 : 6;
+  }
+  function flash(frames=2){
+    FX.flashFrames = Math.max(FX.flashFrames, frames);
+  }
+  function setOverlay(kind,x,y,frames=18){
+    FX.overlay = {kind,x,y,t:0,frames};
+  }
+  function addFloatText(text,x,y){
+    FX.floatTexts.push({text, x, y, vy:-0.25, frames:42});
+  }
 
-  if(target===player) FX.hitAnim.player=10;
-  else FX.hitAnim.enemy=10;
-}
+  function updateFX(dt){
+    if(FX.intro.active){
+      FX.intro.t += dt;
+      if(FX.intro.t >= CONFIG.introDurationMs){
+        FX.intro.active = false;
+      }
+    }
 
-/* =====================
-   STATUTS : burn / sleep / confusion + protect
-===================== */
-function canAct(f, msgs){
-  if(f.status.sleep>0){
-    f.status.sleep--;
-    msgs.push(f.name+" dort...");
-    const c=coordsFor(f);
-    setOverlay("sleep", c.x, c.y, 18);
+    if(FX.shakeFrames > 0){
+      FX.shakeX = (Math.random()-0.5)*6;
+      FX.shakeY = (Math.random()-0.5)*4;
+      FX.shakeFrames--;
+    } else {
+      FX.shakeX = FX.shakeY = 0;
+    }
+
+    if(FX.flashFrames > 0) FX.flashFrames--;
+
+    if(FX.overlay){
+      FX.overlay.t++;
+      FX.overlay.frames--;
+      if(FX.overlay.frames <= 0) FX.overlay = null;
+    }
+
+    FX.floatTexts.forEach(ft=>{
+      ft.y += ft.vy;
+      ft.frames--;
+    });
+    FX.floatTexts = FX.floatTexts.filter(ft => ft.frames > 0);
+
+    if(FX.hitAnim.player>0) FX.hitAnim.player--;
+    if(FX.hitAnim.enemy>0) FX.hitAnim.enemy--;
+  }
+
+  /* =====================
+     TYPES (multiplicateurs cumulables)
+  ===================== */
+  const TYPE_CHART = {
+    action:       { blague:2, parisianisme:0.5 },
+    blague:       { parisianisme:2, recherche:0.5 },
+    recherche:    { blague:2, parisianisme:0.5 },
+    parisianisme: { action:2, tradition:0.5 },
+    tradition:    { parisianisme:2, recherche:0.5 }
+  };
+
+  function typeMultiplier(atkType, defTypes){
+    let m = 1;
+    for(const t of defTypes){
+      const v = TYPE_CHART[atkType]?.[t];
+      if(v) m *= v;
+    }
+    return m;
+  }
+
+  /* =====================
+     UI TEXTE / MENUS
+  ===================== */
+  const UI = {
+    text:"", visible:"", idx:0, typing:false, t:0,
+    queue:[],
+    menu:false,
+    menuKind:"none", // root | fight | bag
+    items:[],        // [{id,label}]
+    menuIdx:0,
+    menuScroll:0,
+    cooldown:0
+  };
+
+  function showText(msg){
+    UI.text = msg;
+    UI.visible = "";
+    UI.idx = 0;
+    UI.typing = true;
+    UI.t = 0;
+    UI.menu = false;
+    UI.menuKind = "none";
+  }
+  function queueText(msg){ UI.queue.push(msg); }
+
+  function updateText(dt){
+    if(!UI.typing) return;
+    UI.t += dt;
+    while(UI.t >= CONFIG.typeDelayMs && UI.idx < UI.text.length){
+      UI.visible += UI.text[UI.idx++];
+      UI.t -= CONFIG.typeDelayMs;
+    }
+    if(UI.idx >= UI.text.length) UI.typing = false;
+  }
+
+  // Avance texte (Enter)
+  function advanceText(){
+    if(UI.typing){
+      UI.visible = UI.text;
+      UI.idx = UI.text.length;
+      UI.typing = false;
+      return true;
+    }
+    if(UI.queue.length > 0){
+      showText(UI.queue.shift());
+      return true;
+    }
+    UI.text = "";
+    UI.visible = "";
     return false;
   }
-  if(f.status.confusion>0){
-    f.status.confusion--;
-    msgs.push(f.name+" est confus...");
-    const c=coordsFor(f);
-    setOverlay("confusion", c.x, c.y, 18);
 
-    if(chance(0.5)){
-      const dmg=Math.max(1,Math.floor(f.maxHP*0.08));
-      applyDamage(f, dmg, {floatLabel:"-CONFUSION"});
-      msgs.push("Il se blesse dans sa confusion !");
+  function openMenu(items, kind){
+    UI.items = items.slice();
+    UI.menuIdx = 0;
+    UI.menuScroll = 0;
+    UI.menu = true;
+    UI.menuKind = kind;
+  }
+
+  function ensureMenuVisible(maxVisible){
+    if(UI.menuIdx < UI.menuScroll) UI.menuScroll = UI.menuIdx;
+    if(UI.menuIdx >= UI.menuScroll + maxVisible) UI.menuScroll = UI.menuIdx - maxVisible + 1;
+    UI.menuScroll = clamp(UI.menuScroll, 0, Math.max(0, UI.items.length - maxVisible));
+  }
+
+  /* =====================
+     FIGHTERS (stats + stages + statuts)
+  ===================== */
+  function stageMultiplier(stage){
+    const s = clamp(stage, -6, 6);
+    if(s >= 0) return 1 + s * 0.15;
+    return 1 + s * 0.10;
+  }
+
+  function createFighter(def){
+    return {
+      name: def.name,
+      displayName: def.displayName || def.name,
+      types: def.types.slice(),
+      sprite: def.sprite,
+
+      maxHP: def.maxHP ?? 100,
+      hp: def.maxHP ?? 100,
+      hpVis: def.maxHP ?? 100,
+
+      base: { ...def.stats },        // atk, def, spd
+      stage: { atk:0, def:0, spd:0}, // stages
+
+      status: { burn:false, sleep:0, confusion:0, protect:0 },
+
+      moves: def.moves.map(m => ({
+        name: m.name,
+        type: m.type,
+        power: m.power ?? 0,
+        accuracy: (m.accuracy ?? 1),
+        effects: (m.effects ?? []).map(e => ({...e}))
+      })),
+
+      aiProfile: def.aiProfile || "neutral"
+    };
+  }
+
+  function resetForFight(f){
+    f.hp = f.maxHP;
+    f.hpVis = f.maxHP;
+    f.stage = { atk:0, def:0, spd:0 };
+    f.status = { burn:false, sleep:0, confusion:0, protect:0 };
+  }
+
+  function effectiveStat(f, key){
+    const base = f.base[key];
+    const mult = stageMultiplier(f.stage[key] || 0);
+    let v = Math.floor(base * mult);
+
+    // Burn : malus atk
+    if(key === "atk" && f.status.burn) v = Math.floor(v * 0.5);
+    return Math.max(1, v);
+  }
+
+  function anchorOf(f){
+    // positions "au-dessus" des sprites (pour overlays/float)
+    if(f === player) return { x:70, y:130 };
+    return { x:240, y:70 };
+  }
+
+  /* =====================
+     MOVES (format Pokemon-like)
+     - effects : liste d'effets extensible
+       kind: burn|sleep|confusion|heal|protect|stat
+  ===================== */
+  function M(name, type, power, accuracy, effects){
+    return { name, type, power, accuracy, effects: effects || [] };
+  }
+  function E(kind, target, chanceP, extra){
+    return { kind, target, chance: chanceP ?? 1, ...(extra||{}) };
+  }
+
+  // Player (Remy)
+  const PLAYER_DEF = {
+    name: "Remy",
+    displayName: "Remy",
+    sprite: "remy_back",
+    types: ["recherche","blague"],
+    stats: { atk:55, def:50, spd:60 },
+    moves: [
+      M("Cahier de recherche", "recherche", 24, 0.95, []),
+      M("Plaidoyer", "action", 18, 1.00, [ E("confusion","defender",0.40,{turnsMin:2,turnsMax:4}) ]),
+      M("Bourree auvergnate", "tradition", 28, 0.90, []),
+      M("Second degre", "blague", 20, 0.95, [ E("burn","defender",0.30) ]),
+    ]
+  };
+
+  // Campaign bosses (movesets signature)
+  const CAMPAIGN = [
+    {
+      name:"Laurent Wauquiez",
+      displayName:"Laurent Wauquiez",
+      sprite:"wauquiez_front",
+      types:["parisianisme"],
+      stats:{ atk:62, def:45, spd:50 },
+      aiProfile:"controller",
+      quote:"Moi, je connais les territoires Remy.",
+      moves:[
+        // contrôle/sleep + manipulation
+        M("Dotations publiques", "action", 14, 0.90, [ E("sleep","defender",0.35,{turnsMin:1,turnsMax:2}) ]),
+        M("Ce que les francais veulent", "parisianisme", 0, 1.00, [ E("stat","self",1,{stat:"atk",delta:+1}) ]),
+        M("Mauvaise foi", "blague", 22, 0.95, []),
+        M("Bottes en caoutchouc", "tradition", 16, 1.00, [ E("confusion","defender",0.25,{turnsMin:2,turnsMax:3}) ]),
+      ]
+    },
+    {
+      name:"Eric Ciotti",
+      displayName:"Eric Ciotti",
+      sprite:"ciotti_front",
+      types:["blague"],
+      stats:{ atk:48, def:68, spd:55 },
+      aiProfile:"tank",
+      quote:"C'est quand il y en a beaucoup que ca pose des problemes.",
+      moves:[
+        // tank/protect + debuff
+        M("Retranchement", "parisianisme", 0, 1.00, [ E("protect","self",1,{turns:2}) ]),
+        M("Chauvinisme", "parisianisme", 0, 1.00, [ E("stat","self",1,{stat:"def",delta:+1}) ]),
+        M("Accent chantant", "tradition", 20, 0.95, []),
+        M("UDR", "blague", 16, 0.95, [ E("stat","defender",1,{stat:"atk",delta:-1}) ]),
+      ]
+    },
+    {
+      name:"Maite",
+      displayName:"Maite",
+      sprite:"maite_front",
+      types:["tradition"],
+      stats:{ atk:66, def:55, spd:35 },
+      aiProfile:"brawler",
+      quote:"Miam miam.",
+      moves:[
+        // heal + gros coup risqué
+        M("Ortolan", "tradition", 0, 1.00, [ E("heal","self",1,{value:20}) ]),
+        M("Aiguille", "tradition", 22, 0.90, [ E("confusion","defender",0.30,{turnsMin:2,turnsMax:4}) ]),
+        M("Icone", "blague", 0, 1.00, [ E("stat","self",1,{stat:"atk",delta:+1}) ]),
+        // gros coup mais auto-sommeil (façon "recharge")
+        M("Indigestion", "tradition", 30, 0.85, [ E("sleep","self",1,{turnsMin:1,turnsMax:1}) ]),
+      ]
+    },
+    {
+      name:"L'Edile",
+      displayName:"L'Edile",
+      sprite:"edile_front",
+      types:["action"],
+      stats:{ atk:52, def:60, spd:40 },
+      aiProfile:"strategist",
+      quote:"Brioude ne sera jamais autrement.",
+      moves:[
+        // buff/tempo
+        M("Conseil municipal", "action", 0, 1.00, [ E("stat","self",1,{stat:"def",delta:+1}), E("stat","self",1,{stat:"atk",delta:+1}) ]),
+        M("Clientelisme", "action", 18, 0.95, [ E("stat","self",1,{stat:"def",delta:+1}) ]),
+        M("Monsieur le maire", "action", 0, 1.00, [ E("stat","self",1,{stat:"spd",delta:+1}) ]),
+        M("Bon sens paysan", "tradition", 22, 0.90, [ E("confusion","defender",0.25,{turnsMin:2,turnsMax:3}) ]),
+      ]
+    }
+  ];
+
+  // IA profils
+  const AI_PROFILES = {
+    neutral:    { aggression:0.5, control:0.5 },
+    controller: { aggression:0.45, control:0.85 },
+    tank:       { aggression:0.35, control:0.70 },
+    brawler:    { aggression:0.80, control:0.35 },
+    strategist: { aggression:0.55, control:0.75 }
+  };
+
+  /* =====================
+     INVENTAIRE (BAG)
+  ===================== */
+  const DEFAULT_INV = {
+    potion: 3,
+    antidote: 2,
+    reveil: 2,
+    clarificateur: 2
+  };
+  let inventory = { ...DEFAULT_INV };
+
+  const ITEMS = {
+    potion: {
+      name: "Potion",
+      desc: "+20 HP",
+      use: (target) => {
+        const before = target.hp;
+        target.hp = clamp(target.hp + 20, 0, target.maxHP);
+        return (target.hp > before) ? "Remy recupere 20 HP." : "HP deja au max.";
+      }
+    },
+    antidote: {
+      name: "Antidote",
+      desc: "Retire burn",
+      use: (target) => {
+        if(!target.status.burn) return "Aucune brulure a soigner.";
+        target.status.burn = false;
+        return "La brulure disparait.";
+      }
+    },
+    reveil: {
+      name: "Reveil",
+      desc: "Retire sleep",
+      use: (target) => {
+        if(target.status.sleep <= 0) return "Pas de sommeil a retirer.";
+        target.status.sleep = 0;
+        return "Remy se reveille.";
+      }
+    },
+    clarificateur: {
+      name: "Clarificateur",
+      desc: "Retire confusion",
+      use: (target) => {
+        if(target.status.confusion <= 0) return "Pas de confusion a retirer.";
+        target.status.confusion = 0;
+        return "Les idees redeviennent claires.";
+      }
+    }
+  };
+
+  function buildRootMenu(){
+    return [
+      {id:"fight", label:"FIGHT"},
+      {id:"bag",  label:"BAG"},
+      {id:"run",  label:"RUN"}
+    ];
+  }
+
+  function buildFightMenu(){
+    const items = player.moves.map((m,idx)=>({id:`move:${idx}`, label:m.name}));
+    items.push({id:"back", label:"BACK"});
+    return items;
+  }
+
+  function buildBagMenu(){
+    const rows = [
+      {id:"item:potion", label:`Potion x${inventory.potion}`},
+      {id:"item:antidote", label:`Antidote x${inventory.antidote}`},
+      {id:"item:reveil", label:`Reveil x${inventory.reveil}`},
+      {id:"item:clarificateur", label:`Clarificateur x${inventory.clarificateur}`},
+      {id:"back", label:"BACK"}
+    ];
+    return rows;
+  }
+
+  /* =====================
+     GAME STATE
+  ===================== */
+  const player = createFighter(PLAYER_DEF);
+  let enemy = null;
+  let fightIndex = 0;
+  let gameState = "TITLE"; // TITLE | FIGHT | ENDING
+  let pendingOutcome = null; // {kind:"win"|"lose"|"run"}
+
+  function openRootMenu(){
+    openMenu(buildRootMenu(), "root");
+  }
+  function openFightMenu(){
+    openMenu(buildFightMenu(), "fight");
+  }
+  function openBagMenu(){
+    openMenu(buildBagMenu(), "bag");
+  }
+
+  function startTitle(){
+    gameState = "TITLE";
+    fightIndex = 0;
+    enemy = null;
+    pendingOutcome = null;
+    inventory = { ...DEFAULT_INV };
+
+    UI.queue = [];
+    UI.menu = false;
+    showText("BRIOUDE 2026\n\na tale of AURA\n\nAppuie sur Entree");
+  }
+
+  function startEnding(){
+    gameState = "ENDING";
+    enemy = null;
+    pendingOutcome = null;
+
+    UI.queue = [];
+    UI.menu = false;
+    showText("Bravo.\n\nTu as remporte tous les debats.\n\nMAKE BRIOUDE GREAT AGAIN !\n\nEntree");
+  }
+
+  function startFight(i){
+    gameState = "FIGHT";
+    pendingOutcome = null;
+    fightIndex = i;
+
+    const def = CAMPAIGN[i];
+    enemy = createFighter(def);
+
+    resetForFight(player);
+    resetForFight(enemy);
+
+    FX.intro.active = true;
+    FX.intro.t = 0;
+
+    showText("Un adversaire apparait !");
+    queueText(def.displayName + " entre en scene !");
+    queueText("Choisis une action.");
+    openRootMenu(); // menu prêt (masqué tant que texte pas fini)
+  }
+
+  /* =====================
+     COMBAT CORE
+  ===================== */
+  function rollAccuracy(move){
+    // petit clin d'oeil : micro chance de rater quoi qu'il arrive
+    if(chance(1/256)) return false;
+    return chance(move.accuracy ?? 1);
+  }
+
+  function rollCrit(attacker){
+    const spd = effectiveStat(attacker, "spd");
+    const p = clamp(0.06 + spd / 220, 0.06, 0.20);
+    return chance(p);
+  }
+
+  function computeDamage(attacker, defender, move){
+    const atk = effectiveStat(attacker, "atk");
+    const def = effectiveStat(defender, "def");
+
+    const base = (atk / def) * move.power;
+    const randFactor = 0.85 + Math.random() * 0.15;
+
+    const mult = typeMultiplier(move.type, defender.types);
+    const isCrit = rollCrit(attacker);
+
+    const dmg = Math.max(1, Math.floor(base * randFactor * mult * (isCrit ? 1.9 : 1)));
+    return { dmg, mult, isCrit };
+  }
+
+  function applyDamage(target, amount){
+    target.hp = clamp(target.hp - amount, 0, target.maxHP);
+
+    const a = anchorOf(target);
+    addFloatText(String(amount), a.x, a.y);
+
+    if(target === player) FX.hitAnim.player = 10;
+    else FX.hitAnim.enemy = 10;
+  }
+
+  function applyStage(target, stat, delta){
+    target.stage[stat] = clamp((target.stage[stat] || 0) + delta, -6, 6);
+    const a = anchorOf(target);
+    addFloatText((delta>0?"+":"")+delta+" "+stat.toUpperCase(), a.x, a.y-12);
+  }
+
+  function burnTick(f){
+    if(!f.status.burn) return;
+    const dmg = Math.max(1, Math.floor(f.maxHP * 0.06));
+    queueText(f.displayName + " souffre de sa brulure !");
+    setOverlay("burn", anchorOf(f).x, anchorOf(f).y, 18);
+    applyDamage(f, dmg);
+    addFloatText("-BRULURE", anchorOf(f).x, anchorOf(f).y-12);
+  }
+
+  function canAct(f){
+    // Sleep
+    if(f.status.sleep > 0){
+      f.status.sleep--;
+      queueText(f.displayName + " dort...");
+      setOverlay("sleep", anchorOf(f).x, anchorOf(f).y, 18);
       return false;
     }
+
+    // Confusion
+    if(f.status.confusion > 0){
+      f.status.confusion--;
+      queueText(f.displayName + " est confus...");
+      setOverlay("confusion", anchorOf(f).x, anchorOf(f).y, 18);
+      if(chance(0.5)){
+        queueText("Il se blesse dans sa confusion !");
+        const selfDmg = Math.max(1, Math.floor(f.maxHP * 0.08));
+        applyDamage(f, selfDmg);
+        addFloatText("-CONFUSION", anchorOf(f).x, anchorOf(f).y-12);
+        return false;
+      }
+    }
+    return true;
   }
-  return true;
-}
 
-function burnTick(f, msgs){
-  if(!f.status.burn) return;
-  const dmg=Math.max(1,Math.floor(f.maxHP*0.06));
-  msgs.push(f.name+" souffre de sa brulure !");
-  const c=coordsFor(f);
-  setOverlay("burn", c.x, c.y, 18);
-  applyDamage(f, dmg, {floatLabel:"-BRULURE"});
-}
+  function endOfTurn(f){
+    // Protect countdown
+    if(f.status.protect > 0) f.status.protect--;
 
-function endTurnTick(f){
-  if(f.status.protect>0) f.status.protect--; // protect = 1 tour
-}
-
-/* =====================
-   APPLY EFFECTS (moves)
-===================== */
-function moveHitsDefender(move){
-  if(move.power>0) return true;
-  if(!move.effects) return false;
-  for(let i=0;i<move.effects.length;i++){
-    if(move.effects[i].target==="enemy") return true;
+    // Burn tick
+    burnTick(f);
   }
-  return false;
-}
 
-function applyEffects(attacker, defender, move, msgs){
-  const effects = move.effects || [];
-  for(let i=0;i<effects.length;i++){
-    const e = effects[i];
-    const target = (e.target==="self") ? attacker : defender;
-    const c = coordsFor(target);
+  function applyEffect(effect, attacker, defender){
+    if(!chance(effect.chance ?? 1)) return;
 
-    const p = (typeof e.chance==="number") ? e.chance : 1.0;
-    if(p < 1.0 && !chance(p)) continue;
+    const target = (effect.target === "self") ? attacker : defender;
+    const tName = target.displayName;
 
-    if(e.kind==="burn"){
-      if(!target.status.burn){
-        target.status.burn=true;
-        msgs.push(target.name+" est brule !");
-        setOverlay("burn", c.x, c.y, 18);
-        addFloatText("BRULE", c.x, c.y-12);
+    switch(effect.kind){
+      case "burn":
+        if(target.status.burn) return;
+        target.status.burn = true;
+        queueText(tName + " est brule !");
+        setOverlay("burn", anchorOf(target).x, anchorOf(target).y, 18);
+        addFloatText("BRULE", anchorOf(target).x, anchorOf(target).y-12);
+        return;
+
+      case "sleep":
+        // sleep sur soi (Indigestion) ou sur ennemi
+        if(target.status.sleep > 0) return;
+        const sMin = effect.turnsMin ?? 1;
+        const sMax = effect.turnsMax ?? 2;
+        target.status.sleep = randInt(sMin, sMax);
+        queueText(tName + " s'endort !");
+        setOverlay("sleep", anchorOf(target).x, anchorOf(target).y, 18);
+        addFloatText("SOMMEIL", anchorOf(target).x, anchorOf(target).y-12);
+        return;
+
+      case "confusion":
+        const cMin = effect.turnsMin ?? 2;
+        const cMax = effect.turnsMax ?? 4;
+        target.status.confusion = randInt(cMin, cMax);
+        queueText(tName + " est confus !");
+        setOverlay("confusion", anchorOf(target).x, anchorOf(target).y, 18);
+        addFloatText("CONFUS", anchorOf(target).x, anchorOf(target).y-12);
+        return;
+
+      case "heal":
+        const v = effect.value ?? 20;
+        const before = target.hp;
+        target.hp = clamp(target.hp + v, 0, target.maxHP);
+        if(target.hp > before){
+          queueText(tName + " recupere des forces !");
+          addFloatText("+SOIN", anchorOf(target).x, anchorOf(target).y-12);
+          setOverlay("heal", anchorOf(target).x, anchorOf(target).y, 16);
+        }
+        return;
+
+      case "protect":
+        const turns = effect.turns ?? 2;
+        target.status.protect = Math.max(target.status.protect, turns);
+        queueText(tName + " se protege !");
+        setOverlay("protect", anchorOf(target).x, anchorOf(target).y, 18);
+        addFloatText("PROTECT", anchorOf(target).x, anchorOf(target).y-12);
+        return;
+
+      case "stat":
+        applyStage(target, effect.stat, effect.delta);
+        queueText(tName + " modifie ses stats.");
+        return;
+    }
+  }
+
+  function isMoveBlockedByProtect(defender, move){
+    if(defender.status.protect <= 0) return false;
+    const harmsDefender = (move.power > 0) || (move.effects || []).some(e => e.target === "defender");
+    return harmsDefender;
+  }
+
+  function resolveMove(attacker, defender, move){
+    // Protect check
+    if(isMoveBlockedByProtect(defender, move)){
+      queueText("Mais ca n'atteint pas la cible !");
+      setOverlay("protect", anchorOf(defender).x, anchorOf(defender).y, 18);
+      return;
+    }
+
+    // Statuts (sleep/confusion)
+    if(!canAct(attacker)){
+      // fin du tour malgré blocage
+      endOfTurn(attacker);
+      return;
+    }
+
+    // Accuracy
+    if(!rollAccuracy(move)){
+      queueText("Mais ca rate !");
+      return;
+    }
+
+    // Damage
+    if(move.power > 0){
+      startShake("hit");
+      const {dmg, mult, isCrit} = computeDamage(attacker, defender, move);
+
+      if(isCrit){
+        queueText("Coup critique !");
+        flash(3);
       }
-      continue;
+      if(mult > 1) queueText("C'est tres efficace !");
+      else if(mult < 1) queueText("Ce n'est pas tres efficace...");
+
+      applyDamage(defender, dmg);
     }
 
-    if(e.kind==="sleep"){
-      if(target.status.sleep===0){
-        const turns = e.turns ? randInt(e.turns[0], e.turns[1]) : randInt(1,2);
-        target.status.sleep = turns;
-        msgs.push(target.name+" s'endort !");
-        setOverlay("sleep", c.x, c.y, 18);
-        addFloatText("SOMMEIL", c.x, c.y-12);
+    // Effects
+    (move.effects || []).forEach(e => applyEffect(e, attacker, defender));
+
+    // End-of-turn (burn/protect countdown)
+    endOfTurn(attacker);
+  }
+
+  function computeOrder(a,b){
+    const sa = effectiveStat(a,"spd");
+    const sb = effectiveStat(b,"spd");
+    if(sa === sb) return chance(0.5) ? [a,b] : [b,a];
+    return (sa > sb) ? [a,b] : [b,a];
+  }
+
+  /* =====================
+     IA ENNEMIE (scoring)
+  ===================== */
+  function chooseEnemyMove(enemy, player){
+    const prof = AI_PROFILES[enemy.aiProfile] || AI_PROFILES.neutral;
+
+    const selfLow = enemy.hp < 30;
+    const oppLow  = player.hp < 30;
+
+    const oppBurn  = player.status.burn;
+    const oppSleep = player.status.sleep > 0;
+    const oppConf  = player.status.confusion > 0;
+
+    let best = enemy.moves[0];
+    let bestScore = -1e9;
+
+    for(const m of enemy.moves){
+      let s = Math.random()*0.3; // bruit anti-robot
+
+      const hasHeal = (m.effects||[]).some(e=>e.kind==="heal");
+      const hasProtect = (m.effects||[]).some(e=>e.kind==="protect");
+      const hasSleep = (m.effects||[]).some(e=>e.kind==="sleep" && e.target==="defender");
+      const hasBurn = (m.effects||[]).some(e=>e.kind==="burn");
+      const hasConf = (m.effects||[]).some(e=>e.kind==="confusion" && e.target==="defender");
+      const hasStat = (m.effects||[]).some(e=>e.kind==="stat");
+
+      // 1) Priorités survie
+      if(hasHeal)   s += selfLow ? 3.2 : -0.6;
+      if(hasProtect) s += (selfLow && enemy.status.protect<=0) ? 2.4 : -0.5;
+
+      // 2) Contrôle si utile
+      if(hasSleep) s += (!oppSleep ? 2.2*prof.control : -1.2);
+      if(hasBurn)  s += (!oppBurn  ? 1.4*prof.control : -0.6);
+      if(hasConf)  s += (!oppConf  ? 1.1*prof.control : -0.4);
+      if(hasStat)  s += 0.4*prof.control;
+
+      // 3) Dégâts + types
+      if(m.power > 0){
+        const mult = typeMultiplier(m.type, player.types);
+        s += prof.aggression * (m.power / 26);
+        if(mult > 1) s += 1.6;
+        if(mult < 1) s -= 1.1;
+        if(oppLow) s += 1.0; // finisher
+      } else {
+        s += 0.25; // move utilitaire
       }
-      continue;
-    }
 
-    if(e.kind==="confusion"){
-      const turns = e.turns ? randInt(e.turns[0], e.turns[1]) : randInt(2,4);
-      target.status.confusion = turns;
-      msgs.push(target.name+" est confus !");
-      setOverlay("confusion", c.x, c.y, 18);
-      addFloatText("CONFUS", c.x, c.y-12);
-      continue;
-    }
+      // 4) Si brulé : évite un peu les moves "all-in"
+      if(enemy.status.burn && m.power > 24) s -= 0.5;
 
-    if(e.kind==="protect"){
-      if(target.status.protect===0){
-        target.status.protect=1;
-        msgs.push(target.name+" se protege !");
-        setOverlay("protect", c.x, c.y, 18);
-        addFloatText("PROTECT", c.x, c.y-12);
+      if(s > bestScore){
+        bestScore = s;
+        best = m;
       }
-      continue;
+    }
+    return best;
+  }
+
+  /* =====================
+     ACTIONS PLAYER
+  ===================== */
+  function declareOutcome(kind){
+    pendingOutcome = { kind };
+  }
+
+  function endFightWin(){
+    UI.menu = false;
+    showText(enemy.displayName + " est hors debat !");
+    queueText(CAMPAIGN[fightIndex].quote);
+    queueText("Entree.");
+    declareOutcome("win");
+  }
+
+  function endFightLose(){
+    UI.menu = false;
+    showText("Remy est a court d'arguments...");
+    queueText("Le debat est perdu.");
+    queueText("Entree.");
+    declareOutcome("lose");
+  }
+
+  function openPostRoundMenu(){
+    // menu prêt même si du texte est encore en file : il s'affichera après
+    openRootMenu();
+  }
+
+  function performPlayerMove(moveIdx){
+    if(!enemy) return;
+
+    UI.menu = false;
+
+    const pMove = player.moves[moveIdx];
+    const eMove = chooseEnemyMove(enemy, player);
+
+    const [first, second] = computeOrder(player, enemy);
+    const firstMove  = (first === player) ? pMove : eMove;
+    const secondMove = (second === player) ? pMove : eMove;
+
+    showText(first.displayName + " utilise " + firstMove.name + " !");
+    resolveMove(first, first===player ? enemy : player, firstMove);
+
+    if(player.hp <= 0){ endFightLose(); return; }
+    if(enemy.hp <= 0){ endFightWin(); return; }
+
+    queueText(second.displayName + " utilise " + secondMove.name + " !");
+    resolveMove(second, second===player ? enemy : player, secondMove);
+
+    if(player.hp <= 0){ endFightLose(); return; }
+    if(enemy.hp <= 0){ endFightWin(); return; }
+
+    openPostRoundMenu();
+  }
+
+  function performUseItem(itemId){
+    if(!enemy) return;
+
+    UI.menu = false;
+
+    const key = itemId;
+    const item = ITEMS[key];
+    if(!item){
+      showText("Objet inconnu.");
+      openPostRoundMenu();
+      return;
     }
 
-    if(e.kind==="heal"){
-      const value = Math.max(0, e.value|0);
-      if(value>0){
-        const before=target.hp;
-        target.hp = clamp(target.hp + value, 0, target.maxHP);
-        const healed = target.hp - before;
-        if(healed>0){
-          msgs.push(target.name+" recupere des forces !");
-          setOverlay("heal", c.x, c.y, 18);
-          addFloatText("+"+healed, c.x, c.y);
+    if(inventory[key] <= 0){
+      showText("Plus de " + item.name + ".");
+      openBagMenu();
+      return;
+    }
+
+    // Consomme l'objet (inventaire limité)
+    inventory[key]--;
+
+    showText("Remy utilise " + item.name + " !");
+    queueText(item.desc);
+
+    const res = item.use(player);
+    queueText(res);
+
+    // Tour ennemi ensuite (Pokemon-like)
+    const eMove = chooseEnemyMove(enemy, player);
+    queueText(enemy.displayName + " utilise " + eMove.name + " !");
+    resolveMove(enemy, player, eMove);
+
+    if(player.hp <= 0){ endFightLose(); return; }
+    if(enemy.hp <= 0){ endFightWin(); return; }
+
+    openPostRoundMenu();
+  }
+
+  function attemptRun(){
+    if(!enemy) return;
+
+    UI.menu = false;
+
+    // Pokemon-like : chance basée sur vitesse
+    const ps = effectiveStat(player,"spd");
+    const es = effectiveStat(enemy,"spd");
+    const p = clamp(0.35 + (ps - es)/200, 0.10, 0.90);
+
+    showText("Remy tente de fuir...");
+    if(chance(p)){
+      queueText("Tu prends la fuite.");
+      queueText("Retour au titre.");
+      declareOutcome("run");
+    } else {
+      queueText("Impossible de fuir ce debat !");
+      // l'ennemi joue
+      const eMove = chooseEnemyMove(enemy, player);
+      queueText(enemy.displayName + " utilise " + eMove.name + " !");
+      resolveMove(enemy, player, eMove);
+
+      if(player.hp <= 0){ endFightLose(); return; }
+      openPostRoundMenu();
+    }
+  }
+
+  /* =====================
+     INPUT
+  ===================== */
+  document.addEventListener("keydown", (e) => {
+    if(UI.cooldown > 0) return;
+
+    const key = e.key;
+
+    // TITLE -> start fight
+    if(gameState === "TITLE" && key === "Enter"){
+      startFight(0);
+      UI.cooldown = CONFIG.inputCooldownMs;
+      return;
+    }
+
+    // ENDING -> back title
+    if(gameState === "ENDING" && key === "Enter"){
+      startTitle();
+      UI.cooldown = CONFIG.inputCooldownMs;
+      return;
+    }
+
+    // Texte prioritaire
+    if(UI.text || UI.typing || UI.queue.length){
+      if(key === "Enter"){
+        const progressed = advanceText();
+        if(!progressed){
+          // si une issue est en attente
+          if(pendingOutcome){
+            const kind = pendingOutcome.kind;
+            pendingOutcome = null;
+
+            if(kind === "win"){
+              fightIndex++;
+              if(fightIndex < CAMPAIGN.length) startFight(fightIndex);
+              else startEnding();
+            } else {
+              // lose ou run -> retour titre
+              startTitle();
+            }
+          } else {
+            // si pas d'issue mais on est en fight : menu
+            if(gameState === "FIGHT" && enemy) openRootMenu();
+          }
+        }
+        UI.cooldown = CONFIG.inputCooldownMs;
+      }
+      return;
+    }
+
+    // Menus
+    if(UI.menu){
+      if(key === "ArrowUp"){
+        UI.menuIdx = (UI.menuIdx + UI.items.length - 1) % UI.items.length;
+        UI.cooldown = 60;
+      }
+      if(key === "ArrowDown"){
+        UI.menuIdx = (UI.menuIdx + 1) % UI.items.length;
+        UI.cooldown = 60;
+      }
+
+      if(key === "Escape" || key === "Backspace"){
+        if(UI.menuKind === "fight" || UI.menuKind === "bag"){
+          openRootMenu();
+          UI.cooldown = CONFIG.inputCooldownMs;
         }
       }
-      continue;
-    }
 
-    if(e.kind==="stat"){
-      const stat=e.stat;
-      const delta=e.delta|0;
-      if(stat && delta){
-        target.mods[stat] = clamp((target.mods[stat]||0) + delta, -6, 6);
-        const label = (delta>0?"+":"") + delta + " " + stat.toUpperCase();
-        addFloatText(label, c.x, c.y-2);
-        msgs.push(target.name+" ajuste sa posture !");
+      if(key === "Enter"){
+        const item = UI.items[UI.menuIdx];
+
+        if(UI.menuKind === "root"){
+          if(item.id === "fight") openFightMenu();
+          else if(item.id === "bag") openBagMenu();
+          else if(item.id === "run") attemptRun();
+        }
+        else if(UI.menuKind === "fight"){
+          if(item.id === "back") openRootMenu();
+          else if(item.id.startsWith("move:")){
+            const idx = parseInt(item.id.split(":")[1], 10);
+            performPlayerMove(idx);
+          }
+        }
+        else if(UI.menuKind === "bag"){
+          if(item.id === "back") openRootMenu();
+          else if(item.id.startsWith("item:")){
+            const id = item.id.split(":")[1];
+            performUseItem(id);
+          }
+        }
+
+        UI.cooldown = CONFIG.inputCooldownMs;
       }
-      continue;
     }
-  }
-}
+  });
 
-function applyMove(attacker, defender, move, msgs){
-  // Protect : bloque un move qui touche le defenseur (degats OU statut)
-  if(defender.status.protect>0 && moveHitsDefender(move)){
-    msgs.push("Mais ca n'atteint pas la cible !");
-    const c=coordsFor(defender);
-    setOverlay("protect", c.x, c.y, 18);
-    defender.status.protect=0; // consommé
-    return;
-  }
-
-  // Move de degats
-  if(move.power>0){
-    startShake("hit");
-
-    const {dmg,mult,isCrit}=computeDamage(attacker, defender, move);
-
-    if(isCrit){ msgs.push("Coup critique !"); flash(3); }
-    if(mult>1) msgs.push("C'est tres efficace !");
-    if(mult<1) msgs.push("Ce n'est pas tres efficace...");
-
-    applyDamage(defender, dmg);
-    msgs.push(defender.name+" perd "+dmg+" HP.");
+  /* =====================
+     DRAW HELPERS (panels + text fitting)
+  ===================== */
+  function withClip(x,y,w,h, fn){
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x,y,w,h);
+    ctx.clip();
+    fn();
+    ctx.restore();
   }
 
-  // Effets (status/buffs/heal/protect)
-  applyEffects(attacker, defender, move, msgs);
-}
-
-/* =====================
-   IA ENNEMIE (types + statuts + contexte)
-===================== */
-function scoreEnemyMove(enemyF, playerF, move){
-  let score = 0;
-
-  // Priorité : contrôle si le joueur peut être bloqué
-  const mult = typeMultiplier(move.type, playerF.types);
-
-  // Dégâts attendus (approx, sans random/crit)
-  if(move.power>0){
-    const atk=effectiveStat(enemyF,"atk");
-    const def=effectiveStat(playerF,"def");
-    const expected = (atk/def) * move.power * mult;
-    score += expected;
-  } else {
-    // Move de statut : base de score (sinon l'IA n'en joue jamais)
-    score += 8;
-  }
-
-  // Valorisation type advantage
-  if(mult>1) score += 12;
-  if(mult<1) score -= 6;
-
-  // Valorisation des effets utiles (Pokemon-like)
-  const effects = move.effects || [];
-  for(let i=0;i<effects.length;i++){
-    const e=effects[i];
-
-    if(e.kind==="sleep" && e.target==="enemy" && playerF.status.sleep===0) score += 28;
-    if(e.kind==="confusion" && e.target==="enemy" && playerF.status.confusion===0) score += 16;
-    if(e.kind==="burn" && e.target==="enemy" && !playerF.status.burn) score += 18;
-
-    if(e.kind==="heal" && e.target==="self"){
-      if(enemyF.hp < 45) score += 30;
-      else score -= 8; // heal inutile si full HP
+  function drawPanel(x,y,w,h){
+    // Si tu as un textbox.png propre et petit, tu peux l'utiliser
+    const img = IMG.textbox;
+    const useImg = CONFIG.uiUseImagesIfReasonable && isReasonableUiImage(img);
+    if(useImg){
+      ctx.drawImage(img, x, y, w, h);
+      return;
     }
 
-    if(e.kind==="protect" && e.target==="self"){
-      if(enemyF.status.protect>0) score -= 10;
-      else if(enemyF.hp < 40) score += 22;
-      else score += 6; // parfois utile même pas low
+    // UI procédurale (stable, propre, pixel-friendly)
+    ctx.fillStyle = "#111";
+    ctx.fillRect(x, y, w, h);
+
+    ctx.fillStyle = "#f8f8f8";
+    ctx.fillRect(x+2, y+2, w-4, h-4);
+
+    ctx.strokeStyle = "#444";
+    ctx.strokeRect(x+1, y+1, w-2, h-2);
+
+    ctx.strokeStyle = "#999";
+    ctx.strokeRect(x+2, y+2, w-4, h-4);
+  }
+
+  function drawCursor(x,y){
+    const img = IMG.cursor;
+    const useImg = CONFIG.uiUseImagesIfReasonable && isReasonableUiImage(img);
+    if(useImg){
+      ctx.drawImage(img, x, y, 12, 12);
+      return;
     }
+    // curseur pixel en dur
+    ctx.fillStyle = "#111";
+    // triangle "▶" en pixels
+    ctx.fillRect(x+1, y+5, 2, 2);
+    ctx.fillRect(x+3, y+4, 2, 4);
+    ctx.fillRect(x+5, y+3, 2, 6);
+  }
 
-    if(e.kind==="stat" && e.target==="self"){
-      // buff utile si pas déjà haut
-      const s = enemyF.mods[e.stat]||0;
-      if(s < 3) score += 10;
-      else score -= 6;
+  function ellipsize(text, maxWidthPx, fontPx){
+    setFont(fontPx);
+    if(ctx.measureText(text).width <= maxWidthPx) return text;
+    let t = text;
+    while(t.length > 0 && ctx.measureText(t + "...").width > maxWidthPx){
+      t = t.slice(0, -1);
     }
+    return t.length ? (t + "...") : "...";
   }
 
-  // Finisher si player low HP
-  if(playerF.hp < 30 && move.power>0) score += 18;
-
-  // Légère pénalité si ennemi brûlé (prudence)
-  if(enemyF.status.burn) score -= 4;
-
-  // Bruit anti-robot
-  score += Math.random()*6;
-
-  return score;
-}
-
-function chooseEnemyMove(enemyF, playerF){
-  let best=null;
-  let bestScore=-Infinity;
-
-  for(let i=0;i<enemyF.moves.length;i++){
-    const m=enemyF.moves[i];
-    const s=scoreEnemyMove(enemyF, playerF, m);
-    if(s>bestScore){
-      bestScore=s;
-      best=m;
-    }
-  }
-
-  // petite chance de varier (évite le "toujours le même")
-  if(enemyF.moves.length>1 && chance(0.18)){
-    const alt = enemyF.moves[randInt(0, enemyF.moves.length-1)];
-    return alt;
-  }
-
-  return best || enemyF.moves[0];
-}
-
-/* =====================
-   TOUR (ordre Pokemon-like via SPD)
-===================== */
-function computeOrder(){
-  const ps=effectiveStat(player,"spd");
-  const es=effectiveStat(enemy,"spd");
-  if(ps===es) return chance(0.5) ? ["player","enemy"] : ["enemy","player"];
-  return (ps>es) ? ["player","enemy"] : ["enemy","player"];
-}
-
-/* =====================
-   GAME FLOW
-===================== */
-let gameState="TITLE"; // TITLE | FIGHT | ENDING
-let fightIndex=0;
-
-function startTitle(){
-  gameState="TITLE";
-  fightIndex=0;
-  enemy=null;
-
-  UI.menu=false;
-  UI.items=[];
-  UI.menuIdx=0;
-  UI.queue=[];
-
-  playMessages([
-    "BRIOUDE 2026",
-    "a tale of AURA",
-    "",
-    "Appuie sur Entree"
-  ]);
-}
-
-function startEnding(){
-  gameState="ENDING";
-  enemy=null;
-
-  UI.menu=false;
-  UI.items=[];
-  UI.menuIdx=0;
-  UI.queue=[];
-
-  playMessages([
-    "Bravo.",
-    "",
-    "MAKE BRIOUDE GREAT AGAIN !",
-    "",
-    "Appuie sur Entree"
-  ]);
-}
-
-function startFight(i){
-  gameState="FIGHT";
-  fightIndex=i;
-
-  const d=CAMPAIGN[i];
-  enemy=createFighter(d.name, d.types, d.stats, d.sprite);
-
-  // clone profond des moves (sécurité)
-  enemy.moves = d.moves.map(m=>({
-    name:m.name, type:m.type, power:m.power,
-    effects:(m.effects||[]).map(e=>({ ...e }))
-  }));
-
-  resetFighter(player);
-  resetFighter(enemy);
-
-  // Menu prêt dès le début du combat (réapparaît automatiquement après les textes)
-  openMenu(player.moves.map(m=>m.name));
-
-  playMessages([
-    "Un adversaire apparait !",
-    d.name+" entre en scene !",
-    "Choisis une attaque."
-  ]);
-}
-
-function resolveTurn(playerMoveIdx){
-  if(!enemy) return;
-  if(player.hp<=0 || enemy.hp<=0) return;
-
-  const pMove = player.moves[playerMoveIdx];
-  const eMove = chooseEnemyMove(enemy, player);
-  const order = computeOrder();
-
-  const msgs=[];
-
-  // 1) premier acteur
-  for(let step=0; step<2; step++){
-    const who = order[step];
-    const attacker = (who==="player") ? player : enemy;
-    const defender = (who==="player") ? enemy : player;
-    const move = (who==="player") ? pMove : eMove;
-
-    if(attacker.hp<=0 || defender.hp<=0) break;
-
-    // Statuts bloquants avant de jouer
-    if(!canAct(attacker, msgs)) continue;
-
-    msgs.push(attacker.name+" utilise "+move.name+" !");
-    applyMove(attacker, defender, move, msgs);
-
-    if(defender.hp<=0) break;
-  }
-
-  // 2) fin de tour : burn tick (1x / tour) + expire protect
-  burnTick(player, msgs);
-  burnTick(enemy, msgs);
-  endTurnTick(player);
-  endTurnTick(enemy);
-
-  // 3) check fin de combat
-  if(enemy.hp<=0){
-    UI.menu=false;
-    msgs.push(enemy.name+" est hors debat !");
-    msgs.push(CAMPAIGN[fightIndex].quote);
-    msgs.push("Appuie sur Entree.");
-    playMessages(msgs);
-    return;
-  }
-  if(player.hp<=0){
-    UI.menu=false;
-    msgs.push("Remy est a court d'arguments...");
-    msgs.push("Le debat est perdu.");
-    msgs.push("Appuie sur Entree.");
-    playMessages(msgs);
-    return;
-  }
-
-  // 4) combat continue : reset curseur menu
-  openMenu(player.moves.map(m=>m.name));
-  playMessages(msgs);
-}
-
-/* =====================
-   INPUT
-===================== */
-document.addEventListener("keydown",e=>{
-  if(UI.cooldown>0) return;
-
-  const key=e.key;
-
-  // évite scroll
-  if(key==="ArrowUp" || key==="ArrowDown") e.preventDefault();
-
-  // Start depuis TITLE
-  if(gameState==="TITLE" && key==="Enter"){
-    startFight(0);
-    UI.cooldown=180;
-    return;
-  }
-
-  // Texte prioritaire
-  if(UI.text || UI.typing || UI.queue.length){
-    if(key==="Enter"){
-      const progressed = nextText();
-
-      // Fin de séquence de texte
-      if(!progressed){
-
-        // ENDING => retour titre
-        if(gameState==="ENDING"){
-          startTitle();
-          UI.cooldown=180;
-          return;
-        }
-
-        // Enchaîner campagne après victoire
-        if(gameState==="FIGHT" && enemy && enemy.hp<=0){
-          fightIndex++;
-          if(fightIndex < CAMPAIGN.length) startFight(fightIndex);
-          else startEnding();
-          UI.cooldown=180;
-          return;
-        }
-
-        // Défaite => retour titre
-        if(gameState==="FIGHT" && player.hp<=0){
-          startTitle();
-          UI.cooldown=180;
-          return;
-        }
-
-        // Sinon : on laisse le menu s'afficher (il est déjà prêt)
+  function drawTextFitOneLine(text, x, y, maxWidthPx){
+    // essaie 12 -> 10 -> 8
+    for(const px of CONFIG.fontSizes){
+      setFont(px);
+      if(ctx.measureText(text).width <= maxWidthPx){
+        ctx.fillText(text, x, y);
+        return;
       }
-
-      UI.cooldown=120;
     }
-    return;
+    // sinon ellipsis en 8px
+    const t = ellipsize(text, maxWidthPx, CONFIG.fontSizes[CONFIG.fontSizes.length-1]);
+    setFont(CONFIG.fontSizes[CONFIG.fontSizes.length-1]);
+    ctx.fillText(t, x, y);
   }
 
-  // Menu (combat)
-  if(gameState==="FIGHT" && UI.menu){
-    if(key==="ArrowUp") UI.menuIdx=(UI.menuIdx+UI.items.length-1)%UI.items.length;
-    if(key==="ArrowDown") UI.menuIdx=(UI.menuIdx+1)%UI.items.length;
-    if(key==="Enter"){
-      resolveTurn(UI.menuIdx);
-      UI.cooldown=120;
+  function wrapText(text, maxWidthPx, fontPx, maxLines){
+    setFont(fontPx);
+    const words = text.split(" ");
+    const lines = [];
+    let line = "";
+
+    for(const w of words){
+      const test = line ? (line + " " + w) : w;
+      if(ctx.measureText(test).width <= maxWidthPx){
+        line = test;
+      } else {
+        if(line) lines.push(line);
+        line = w;
+      }
+      if(lines.length === maxLines) break;
     }
+    if(lines.length < maxLines && line) lines.push(line);
+
+    // si on a dépassé, ellipsis dernière ligne
+    if(lines.length === maxLines){
+      const last = lines[maxLines-1];
+      lines[maxLines-1] = ellipsize(last, maxWidthPx, fontPx);
+    }
+    return lines;
   }
 
-  // ENDING : garde-fou si écran vide
-  if(gameState==="ENDING" && key==="Enter"){
-    startTitle();
-    UI.cooldown=180;
-    return;
+  function drawHPBar(x,y,w,h, hpVis, maxHP){
+    const ratio = (maxHP<=0) ? 0 : (hpVis/maxHP);
+    const filled = Math.floor(w * clamp(ratio,0,1));
+
+    ctx.fillStyle = "#111";
+    ctx.fillRect(x-1, y-1, w+2, h+2);
+
+    ctx.fillStyle = "#eee";
+    ctx.fillRect(x, y, w, h);
+
+    let col = "#2a7";
+    if(filled < Math.floor(w*0.25)) col = "#c22";
+    else if(filled < Math.floor(w*0.55)) col = "#ca2";
+
+    ctx.fillStyle = col;
+    ctx.fillRect(x, y, filled, h);
   }
-});
 
-/* =====================
-   DRAW HELPERS
-===================== */
-function drawBox(x,y,w,h){
-  if(IMG.textbox){
-    ctx.drawImage(IMG.textbox,x,y,w,h);
-    return;
+  function drawOverlay(){
+    if(!FX.overlay) return;
+    const {kind,x,y,t} = FX.overlay;
+
+    ctx.fillStyle = "#111";
+    ctx.textAlign = "center";
+    setFont(12);
+
+    if(kind === "confusion"){
+      const dx = Math.sin(t/3)*4;
+      ctx.fillText("???", x+dx, y-18);
+    } else if(kind === "sleep"){
+      ctx.fillText("Zzz", x, y-18);
+    } else if(kind === "burn"){
+      ctx.fillText("🔥", x, y-18);
+    } else if(kind === "protect"){
+      ctx.fillText("⛨", x, y-18);
+    } else if(kind === "heal"){
+      ctx.fillText("+", x, y-18);
+    }
+    ctx.textAlign = "left";
   }
-  ctx.fillStyle="#f8f8f8";
-  ctx.fillRect(x,y,w,h);
-  ctx.strokeStyle="#111";
-  ctx.strokeRect(x,y,w,h);
-}
 
-function drawHPBar(x,y,hpVis,maxHP){
-  const w=60, h=5;
-  const ratio = (maxHP<=0)?0:(hpVis/maxHP);
-  const filled = Math.floor(w*clamp(ratio,0,1));
+  function drawFloatTexts(){
+    ctx.fillStyle = "#111";
+    ctx.textAlign = "center";
+    setFont(10);
+    FX.floatTexts.forEach(ft => {
+      ctx.fillText(ft.text, ft.x, ft.y);
+    });
+    ctx.textAlign = "left";
+  }
 
-  ctx.fillStyle="#111";
-  ctx.fillRect(x-1,y-1,w+2,h+2);
-  ctx.fillStyle="#eee";
-  ctx.fillRect(x,y,w,h);
+  /* =====================
+     DRAW SCENES
+  ===================== */
+  function drawHudEnemy(){
+    if(!enemy) return;
 
-  let col="#2a7";
-  if(filled<14) col="#c22";
-  else if(filled<30) col="#ca2";
+    const x=12, y=10, w=176, h=58;
+    drawPanel(x,y,w,h);
 
-  ctx.fillStyle=col;
-  ctx.fillRect(x,y,filled,h);
-}
+    // contenu : padding + clip
+    withClip(x+4,y+4,w-8,h-8, () => {
+      ctx.fillStyle="#111";
 
-function drawSprite(key,x,y,bounce=0){
-  const img=IMG[key];
-  if(img){
-    ctx.drawImage(img,x,y-bounce,64,64);
-  } else {
+      // Name + Type
+      drawTextFitOneLine(enemy.displayName, x+8, y+8,  w-16);
+      setFont(10);
+      const tLine = enemy.types.join(" / ");
+      ctx.fillText(ellipsize(tLine, w-16, 10), x+8, y+22);
+
+      // HP
+      drawHPBar(x+8, y+38, w-16, 6, enemy.hpVis, enemy.maxHP);
+      setFont(10);
+      ctx.fillText(`HP ${Math.round(enemy.hpVis)}/${enemy.maxHP}`, x+8, y+46);
+    });
+  }
+
+  function drawHudPlayer(){
+    const x=136, y=110, w=176, h=62;
+    drawPanel(x,y,w,h);
+
+    withClip(x+4,y+4,w-8,h-8, () => {
+      ctx.fillStyle="#111";
+
+      drawTextFitOneLine(player.displayName, x+8, y+8, w-16);
+      setFont(10);
+      const tLine = player.types.join(" / ");
+      ctx.fillText(ellipsize(tLine, w-16, 10), x+8, y+22);
+
+      drawHPBar(x+8, y+40, w-16, 6, player.hpVis, player.maxHP);
+      setFont(10);
+      ctx.fillText(`HP ${Math.round(player.hpVis)}/${player.maxHP}`, x+8, y+48);
+    });
+  }
+
+  function drawSprite(key,x,y,bounce=0){
+    const img = IMG[key];
+    if(img){
+      ctx.drawImage(img, x, y-bounce, 64, 64);
+      return;
+    }
+    // fallback placeholder
     ctx.fillStyle="#333";
     ctx.fillRect(x,y,64,64);
     ctx.fillStyle="#111";
-    ctx.fillText(key,x+4,y+16);
-  }
-}
-
-function drawOverlay(){
-  if(!FX.overlay) return;
-  const {kind,x,y,t}=FX.overlay;
-  ctx.fillStyle="#111";
-  ctx.textAlign="center";
-
-  if(kind==="confusion"){
-    const dx = Math.sin(t/3)*4;
-    ctx.fillText("???", x+dx, y-18);
-  } else if(kind==="sleep"){
-    ctx.fillText("Zzz", x, y-18);
-  } else if(kind==="burn"){
-    ctx.fillText("🔥", x, y-18);
-  } else if(kind==="protect"){
-    ctx.fillText("⛨", x, y-18);
-  } else if(kind==="heal"){
-    ctx.fillText("+", x, y-18);
+    setFont(8);
+    ctx.fillText(key, x+2, y+2);
   }
 
-  ctx.textAlign="left";
-}
-
-function drawFloatTexts(){
-  ctx.fillStyle="#111";
-  ctx.textAlign="center";
-  FX.floatTexts.forEach(ft=>{
-    ctx.fillText(ft.text, ft.x, ft.y);
-  });
-  ctx.textAlign="left";
-}
-
-function drawTextbox(){
-  if(!UI.text && !UI.typing && UI.queue.length===0) return;
-  drawBox(8,168,304,64);
-  ctx.fillStyle="#111";
-  const lines=(UI.visible||UI.text).split("\n");
-  for(let i=0;i<Math.min(3,lines.length);i++){
-    ctx.fillText(lines[i],16,188+i*14);
-  }
-}
-
-function drawMenu(){
-  if(!UI.menu) return;
-  drawBox(8,168,304,64);
-  ctx.fillStyle="#111";
-
-  for(let i=0;i<Math.min(4,UI.items.length);i++){
-    const y=188+i*14;
-    if(i===UI.menuIdx){
-      if(IMG.cursor) ctx.drawImage(IMG.cursor, 16, y-10, 12, 12);
-      else ctx.fillText("▶",16,y);
+  function drawBattle(){
+    // background
+    if(IMG.battle){
+      ctx.drawImage(IMG.battle, 0, 0, W, H);
+    } else {
+      ctx.fillStyle="#e9e2b8";
+      ctx.fillRect(0,0,W,H);
+      // sol simple
+      ctx.fillStyle="#b8b07d";
+      ctx.fillRect(0,140,W,40);
     }
-    ctx.fillText(UI.items[i],32,y);
+
+    // intro slide
+    let p = 1;
+    if(FX.intro.active){
+      p = clamp(FX.intro.t / CONFIG.introDurationMs, 0, 1);
+    }
+    const ease = p*(2-p); // easeOut
+
+    const enemyBounce  = FX.hitAnim.enemy  > 0 ? ((FX.hitAnim.enemy%2)?2:1) : 0;
+    const playerBounce = FX.hitAnim.player > 0 ? ((FX.hitAnim.player%2)?2:1) : 0;
+
+    const enemyX = 210 + (1-ease)*80;
+    const playerX = 40  - (1-ease)*80;
+
+    if(enemy) drawSprite(enemy.sprite, enemyX, 40, enemyBounce);
+    drawSprite(player.sprite, playerX, 110, playerBounce);
+
+    drawHudEnemy();
+    drawHudPlayer();
+
+    drawOverlay();
+    drawFloatTexts();
   }
-}
 
-function drawBattle(){
-  if(IMG.battle) ctx.drawImage(IMG.battle,0,0,W,H);
-  else{
-    ctx.fillStyle="#e9e2b8";
-    ctx.fillRect(0,0,W,H);
-  }
+  function drawTextbox(){
+    const x=8, y=168, w=304, h=64;
+    drawPanel(x,y,w,h);
 
-  const enemyBounce = FX.hitAnim.enemy>0 ? (FX.hitAnim.enemy%2?2:1) : 0;
-  const playerBounce = FX.hitAnim.player>0 ? (FX.hitAnim.player%2?2:1) : 0;
+    const contentX = x+10;
+    const contentY = y+10;
+    const contentW = w-20;
 
-  if(enemy) drawSprite(enemy.sprite, 210, 40, enemyBounce);
-  drawSprite(player.sprite, 40, 110, playerBounce);
-
-  // HUD enemy
-  if(enemy){
-    drawBox(12,12,170,56);
     ctx.fillStyle="#111";
-    ctx.fillText(enemy.name,18,26);
-    ctx.fillText(enemy.types.join(" / "),18,38);
-    drawHPBar(18,44,enemy.hpVis,enemy.maxHP);
-    ctx.fillText(`HP ${Math.round(enemy.hpVis)}/${enemy.maxHP}`, 18, 60);
+
+    // wrap auto (3 lignes max)
+    const raw = (UI.visible || UI.text || "");
+    const parts = raw.split("\n");
+    const lines = [];
+
+    for(const p of parts){
+      // wrap chaque paragraphe
+      const wrapped = wrapText(p, contentW, 12, 3 - lines.length);
+      for(const l of wrapped) lines.push(l);
+      if(lines.length >= 3) break;
+    }
+
+    setFont(12);
+    for(let i=0;i<Math.min(3,lines.length);i++){
+      ctx.fillText(lines[i], contentX, contentY + i*CONFIG.lineH);
+    }
   }
 
-  // HUD player
-  drawBox(138,112,174,56);
-  ctx.fillStyle="#111";
-  ctx.fillText("Remy",144,128);
-  ctx.fillText(player.types.join(" / "),144,142);
+  function drawMenu(){
+    const x=8, y=168, w=304, h=64;
+    drawPanel(x,y,w,h);
 
-  // HP bar plus bas -> ne superpose pas le texte
-  drawHPBar(144,148,player.hpVis,player.maxHP);
-  ctx.fillText(`HP ${Math.round(player.hpVis)}/${player.maxHP}`,144,162);
+    const maxVisible = 4;
+    ensureMenuVisible(maxVisible);
 
-  drawOverlay();
-  drawFloatTexts();
-}
+    ctx.fillStyle="#111";
+    setFont(12);
 
-/* =====================
-   LOOP
-===================== */
-let last=performance.now();
+    const start = UI.menuScroll;
+    const end = Math.min(UI.items.length, start + maxVisible);
 
-function updateHpVisuals(dt){
-  const speed = 80 * (dt/1000);
+    for(let i=start; i<end; i++){
+      const row = i - start;
+      const item = UI.items[i];
+      const yy = y + 10 + row*CONFIG.lineH;
 
-  const stepToward = (cur, target) => {
-    if(Math.abs(cur-target) < 0.2) return target;
-    if(cur < target) return Math.min(target, cur + speed);
-    return Math.max(target, cur - speed);
-  };
+      if(i === UI.menuIdx){
+        drawCursor(x+6, yy+2);
+      }
 
-  player.hpVis = stepToward(player.hpVis, player.hp);
-  if(enemy) enemy.hpVis = stepToward(enemy.hpVis, enemy.hp);
-}
+      // texte qui fit dans le cartouche
+      const label = ellipsize(item.label, w-40, 12);
+      ctx.fillText(label, x+24, yy);
+    }
+  }
 
-function loop(now){
-  const dt=now-last; last=now;
-  if(UI.cooldown>0) UI.cooldown-=dt;
-
-  updateText(dt);
-  updateFX();
-  updateHpVisuals(dt);
-
-  ctx.save();
-  ctx.translate(FX.shakeX, FX.shakeY);
-
-  // TITLE / ENDING = écran texte
-  if(gameState==="TITLE" || gameState==="ENDING"){
+  function drawTitle(){
     ctx.fillStyle="#f3f0da";
     ctx.fillRect(0,0,W,H);
+
     ctx.fillStyle="#111";
     ctx.textAlign="center";
-    ctx.fillText("BRIOUDE 2026",160,80);
-    ctx.fillText("a tale of AURA",160,96);
+    setFont(12);
+    ctx.fillText("BRIOUDE 2026", 160, 70);
+    setFont(10);
+    ctx.fillText("a tale of AURA", 160, 88);
     ctx.textAlign="left";
+
     drawTextbox();
-  } else {
-    drawBattle();
-    if(UI.text || UI.typing || UI.queue.length) drawTextbox();
-    else drawMenu();
   }
 
-  ctx.restore();
-
-  if(FX.flashFrames>0){
-    ctx.fillStyle="rgba(255,255,255,0.6)";
+  function drawEnding(){
+    ctx.fillStyle="#f3f0da";
     ctx.fillRect(0,0,W,H);
+    drawTextbox();
   }
 
-  requestAnimationFrame(loop);
-}
+  /* =====================
+     LOOP
+  ===================== */
+  let last = performance.now();
 
-/* =====================
-   BOOT
-===================== */
-preloadAssets(()=>{
-  startTitle();
-  requestAnimationFrame(loop);
-});
+  function updateHpVisuals(dt){
+    const speed = CONFIG.hpDrainPerSec * (dt/1000);
+
+    function step(cur, target){
+      if(Math.abs(cur-target) < 0.2) return target;
+      if(cur < target) return Math.min(target, cur + speed);
+      return Math.max(target, cur - speed);
+    }
+
+    player.hpVis = step(player.hpVis, player.hp);
+    if(enemy) enemy.hpVis = step(enemy.hpVis, enemy.hp);
+  }
+
+  function loop(now){
+    const dt = now - last; last = now;
+    if(UI.cooldown > 0) UI.cooldown -= dt;
+
+    updateText(dt);
+    updateFX(dt);
+    updateHpVisuals(dt);
+
+    ctx.save();
+    ctx.translate(FX.shakeX, FX.shakeY);
+
+    if(gameState === "TITLE"){
+      drawTitle();
+    } else if(gameState === "ENDING"){
+      drawEnding();
+    } else {
+      drawBattle();
+      if(UI.text || UI.typing || UI.queue.length) drawTextbox();
+      else drawMenu();
+    }
+
+    ctx.restore();
+
+    // flash
+    if(FX.flashFrames > 0){
+      ctx.fillStyle="rgba(255,255,255,0.6)";
+      ctx.fillRect(0,0,W,H);
+    }
+
+    requestAnimationFrame(loop);
+  }
+
+  /* =====================
+     BOOT
+  ===================== */
+  preloadAssets(() => {
+    startTitle();
+    requestAnimationFrame(loop);
+  });
 
 })();
 </script>
